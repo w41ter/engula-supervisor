@@ -17,3 +17,7 @@ rand = { version = "0.8.4", features = ["small_rng"] }
 
 [dependencies.engula-client]
 git = "https://github.com/engula/engula.git"
+
+[patch."https://github.com/engula/engula.git"]
+engula-client = { path = "../engula/src/client" }
+engula-api = { path = "../engula/src/api" }

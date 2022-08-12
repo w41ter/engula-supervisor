@@ -1,9 +1,9 @@
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use engula_client::Collection;
 use tokio::sync::Mutex;
-use tracing::info;
+use tracing::{error, info};
 
 use crate::{
     base::{ExecCtx, Writer},
@@ -23,23 +23,16 @@ struct CoreReader {
 
 struct WriterTracker {
     accessed_step: usize,
-    expect_status: TrackerExpectStatus,
     gen: Generator,
     writer: Arc<dyn Writer>,
+    expected: HashMap<Vec<u8>, TrackerExpectStatus>,
 }
 
 #[allow(unused)]
 #[derive(Debug)]
 enum TrackerExpectStatus {
-    None,
-    Existed {
-        key: Vec<u8>,
-        value: Vec<u8>,
-        step: usize,
-    },
-    Deleted {
-        key: Vec<u8>,
-    },
+    Existed { value: Vec<u8>, step: usize },
+    Deleted,
 }
 
 impl Reader {
@@ -48,8 +41,8 @@ impl Reader {
             .into_iter()
             .map(|w| WriterTracker {
                 accessed_step: 0,
-                expect_status: TrackerExpectStatus::None,
-                gen: Generator::new(w.seed(), w.config()),
+                gen: Generator::new(w.seed(), w.index() as u64, w.config()),
+                expected: HashMap::new(),
                 writer: w,
             })
             .collect();
@@ -93,56 +86,63 @@ impl CoreReader {
         panic!("could not verify op after 120 secs");
     }
 
-    async fn verify_next_op(&mut self, tracker: usize, next_op: &NextOp) -> Result<()> {
+    fn advance_expect_status(&mut self, tracker: usize, next_op: &NextOp) {
         let tracker = &mut self.trackers[tracker];
         match next_op {
             NextOp::Delete { key } => {
-                if matches!(tracker.expect_status, TrackerExpectStatus::Deleted { .. }) {
-                    tracker.expect_status = TrackerExpectStatus::None;
-                }
-
-                if let Some(value) = self.collection.get(key.clone()).await? {
-                    let v = Value::from(value.as_slice());
-                    let value = v.value();
-                    if v.writer() == tracker.writer.index() {
-                        if v.index() + 1 < tracker.accessed_step {
-                            panic!(
-                                "reader {} read a staled key {} writted by writer {}, values is {}",
-                                self.index,
-                                String::from_utf8_lossy(value.as_slice()),
-                                tracker.writer.index(),
-                                String::from_utf8_lossy(value.as_slice()),
-                            );
-                        } else {
-                            // This writer will put a value
-                            tracker.expect_status = TrackerExpectStatus::Existed {
-                                key: key.clone(),
-                                value: value.clone(),
-                                step: v.index(),
-                            };
-                        }
+                if let Some(expect_status) = tracker.expected.get(key) {
+                    if matches!(expect_status, TrackerExpectStatus::Deleted { .. }) {
+                        tracker.expected.remove(key);
                     }
                 }
             }
-            NextOp::Put { key, value } => {
-                if let TrackerExpectStatus::Existed {
-                    key: expect_key,
-                    step,
-                    ..
-                } = &tracker.expect_status
-                {
-                    if *step == tracker.accessed_step && key == expect_key {
-                        tracker.expect_status = TrackerExpectStatus::None;
+            NextOp::Put { key, .. } => {
+                if let Some(status) = tracker.expected.get(key) {
+                    if matches!(status, TrackerExpectStatus::Existed { step, .. } if *step == tracker.accessed_step)
+                    {
+                        tracker.expected.remove(key);
                     }
                 }
+            }
+        }
+    }
 
+    async fn verify_next_op(&mut self, tracker: usize, next_op: &NextOp) -> Result<()> {
+        self.advance_expect_status(tracker, next_op);
+
+        let tracker = &mut self.trackers[tracker];
+        match next_op {
+            NextOp::Delete { key } => {
+                if let Some(value) = self.collection.get(key.clone()).await? {
+                    let v = Value::from(value.as_slice());
+                    let value = v.value();
+                    if v.index() + 1 < tracker.accessed_step {
+                        panic!(
+                            "reader {} read a staled key {} writted by writer {}, values is {}",
+                            self.index,
+                            String::from_utf8_lossy(value.as_slice()),
+                            tracker.writer.index(),
+                            String::from_utf8_lossy(value.as_slice()),
+                        );
+                    }
+
+                    // This writer will put a value in the corresponding index.
+                    tracker.expected.insert(
+                        key.clone(),
+                        TrackerExpectStatus::Existed {
+                            value,
+                            step: v.index(),
+                        },
+                    );
+                }
+            }
+            NextOp::Put { key, value } => {
                 match self.collection.get(key.clone()).await? {
                     Some(got_value) => {
                         let v = Value::from(got_value.as_slice());
                         let got_value = v.value();
-                        if v.writer() == tracker.writer.index() {
-                            if v.index() + 1 < tracker.accessed_step {
-                                panic!(
+                        if v.index() + 1 < tracker.accessed_step {
+                            panic!(
                                 "reader {} read a staled key {} writted by writer {} step {}, values is {}",
                                 self.index,
                                 String::from_utf8_lossy(key.as_slice()),
@@ -150,24 +150,30 @@ impl CoreReader {
                                 v.index(),
                                 String::from_utf8_lossy(value.as_slice()),
                             );
-                            } else if v.index() == tracker.accessed_step {
-                                if got_value != *value {
-                                    panic!("reader {} read a key {} writted by writer {} with different value",
-                                self.index,
-                                String::from_utf8_lossy(value.as_slice()),
-                                tracker.writer.index(),
-                                    );
-                                }
-                            } else {
-                                tracker.expect_status = TrackerExpectStatus::Existed {
-                                    key: key.clone(),
-                                    value: got_value,
-                                    step: v.index(),
-                                };
+                        } else if v.index() == tracker.accessed_step {
+                            if got_value != *value {
+                                panic!("reader {} read a key {} writted by writer {} with different value",
+                                    self.index,
+                                    String::from_utf8_lossy(value.as_slice()),
+                                    tracker.writer.index(),
+                                );
                             }
+                        } else {
+                            // This writer will put a value in the corresponding index.
+                            tracker.expected.insert(
+                                key.clone(),
+                                TrackerExpectStatus::Existed {
+                                    value: value.clone(),
+                                    step: v.index(),
+                                },
+                            );
                         }
                     }
-                    None => {}
+                    None => {
+                        tracker
+                            .expected
+                            .insert(key.clone(), TrackerExpectStatus::Deleted);
+                    }
                 };
             }
         }
@@ -176,31 +182,39 @@ impl CoreReader {
 
     fn verify_and_reset_tracker(&mut self, tracker_index: usize) {
         let tracker = &mut self.trackers[tracker_index];
-        match &tracker.expect_status {
-            TrackerExpectStatus::Deleted { key } => {
-                panic!(
-                    "reader {} read key {} should has been deleted by writer {}, access step {}",
-                    self.index,
-                    String::from_utf8_lossy(key),
-                    tracker.writer.index(),
-                    tracker.accessed_step,
-                );
-            }
-            TrackerExpectStatus::Existed { key, step, .. } => {
-                panic!(
-                    "reader {} read key {} should has been written by writer {} at step {}, access step {}",
-                    self.index,
-                    String::from_utf8_lossy(key),
-                    tracker.writer.index(),
-                    step,
-                    tracker.accessed_step,
-                );
-            }
-            TrackerExpectStatus::None => {
-                // passed
-                tracker.reset();
+
+        for (key, expect_status) in &tracker.expected {
+            match expect_status {
+                TrackerExpectStatus::Deleted => {
+                    error!(
+                        "reader {} read key {} should has been deleted by writer {}, access step {}",
+                        self.index,
+                        String::from_utf8_lossy(key),
+                        tracker.writer.index(),
+                        tracker.accessed_step,
+                    );
+                }
+                TrackerExpectStatus::Existed { step, .. } => {
+                    error!(
+                        "reader {} read key {} should has been written by writer {} at step {}, access step {}",
+                        self.index,
+                        String::from_utf8_lossy(key),
+                        tracker.writer.index(),
+                        step,
+                        tracker.accessed_step,
+                    );
+                }
             }
         }
+        if !tracker.expected.is_empty() {
+            panic!(
+                "reader {} meets {} unresolved expect status",
+                self.index,
+                tracker.expected.len()
+            );
+        }
+
+        tracker.reset();
     }
 }
 
@@ -208,7 +222,7 @@ impl WriterTracker {
     fn reset(&mut self) {
         self.accessed_step = 0;
         self.gen.reset();
-        self.expect_status = TrackerExpectStatus::None;
+        self.expected = HashMap::new();
     }
 }
 
@@ -216,9 +230,10 @@ impl WriterTracker {
 impl super::base::Task for Reader {
     async fn run(&self, mut ctx: ExecCtx) {
         let mut core = self.core.lock().await;
-        while let Some(_) = ctx
+        while ctx
             .wait_until_timeout_or_shutdown(Duration::from_millis(10))
             .await
+            .is_some()
         {
             for tracker in 0..core.trackers.len() {
                 core.verify(tracker).await;

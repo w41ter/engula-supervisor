@@ -22,6 +22,7 @@ impl Value {
         buf
     }
 
+    #[allow(unused)]
     #[inline]
     pub fn writer(&self) -> usize {
         self.writer

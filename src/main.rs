@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
     let content = std::fs::read_to_string(&args.config)?;
     let cfg: AppConfig = toml::from_str(&content)?;
 
-    let client = EngulaClient::connect(cfg.addrs[0].clone()).await?;
+    let client = EngulaClient::connect(cfg.addrs).await?;
     info!("connect to engula cluster success");
     let db = client.create_database(cfg.db.clone()).await?;
     info!("create database success");

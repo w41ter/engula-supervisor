@@ -40,7 +40,7 @@ impl Writer {
             step: AtomicUsize::new(0),
             collection,
             core: Mutex::new(CoreWriter {
-                gen: Generator::new(seed, config),
+                gen: Generator::new(seed, index as u64, config),
             }),
         }
     }
