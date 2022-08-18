@@ -10,7 +10,7 @@ ROUND_INTERVAL_MAX=60
 RESTART_INTERVAL_MIN=16
 RESTART_INTERVAL_MAX=32
 
-export RUST_LOG=debug
+export RUST_LOG=info,engula_client=debug
 
 function msg() {
     echo "$(date '+%Y-%m-%d %H:%M:%S'): $@"
