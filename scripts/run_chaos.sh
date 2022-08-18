@@ -5,9 +5,15 @@ BASE_DIR=$(pwd)
 ENGULA_DIR=${BASE_DIR}/../engula
 NUM_SERVERS=5
 TEST_NAME=cluster_test
+ROUND_INTERVAL_MIN=30
+ROUND_INTERVAL_MAX=60
+RESTART_INTERVAL_MIN=16
+RESTART_INTERVAL_MAX=32
+
+export RUST_LOG=debug
 
 function msg() {
-    echo "`date '+%Y-%m-%d %H:%M:%S'`: $@"
+    echo "$(date '+%Y-%m-%d %H:%M:%S'): $@"
 }
 
 function run_supervisor() {
@@ -37,7 +43,7 @@ function restart_server() {
     msg "stop server ${server_id}"
     ./scripts/bootstrap.sh stop ${server_id}
 
-    local seconds=$(random_range 30 120)
+    local seconds=$(random_range ${RESTART_INTERVAL_MIN} ${RESTART_INTERVAL_MAX})
     msg "wait ${seconds} seconds before start server"
     sleep ${seconds}
 
@@ -95,6 +101,12 @@ function start_cluster() {
     popd ${ENGULA_DIR} >/dev/null 2>&1
 }
 
+pidof engula-supervisor >/dev/null
+if [[ $? != "1" ]]; then
+    msg "there exists a supervisor"
+    exit 1
+fi
+
 start_cluster
 sleep 10
 run_supervisor
@@ -103,7 +115,7 @@ while [[ true ]]; do
     next_random_op
     check_cluster_status
 
-    seconds=$(random_range 60 120)
+    seconds=$(random_range ${ROUND_INTERVAL_MIN} ${ROUND_INTERVAL_MAX})
     msg "sleep ${seconds} seconds before next rounds"
     sleep ${seconds}
 done
