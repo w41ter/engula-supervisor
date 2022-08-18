@@ -6,13 +6,13 @@ mod reader;
 mod value;
 mod writer;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use async_trait::async_trait;
 use base::Config;
 use clap::Parser;
-use engula_client::{EngulaClient, Partition};
+use engula_client::{ClientOptions, EngulaClient, Partition};
 use rand::{rngs::OsRng, RngCore};
 use reader::Reader;
 use serde::{Deserialize, Serialize};
@@ -61,7 +61,11 @@ async fn main() -> Result<()> {
     let content = std::fs::read_to_string(&args.config)?;
     let cfg: AppConfig = toml::from_str(&content)?;
 
-    let client = EngulaClient::connect(cfg.addrs).await?;
+    let opts = ClientOptions {
+        connect_timeout: Some(Duration::from_millis(200)),
+        timeout: Some(Duration::from_millis(500)),
+    };
+    let client = EngulaClient::new(opts, cfg.addrs).await?;
     info!("connect to engula cluster success");
     let db = client.create_database(cfg.db.clone()).await?;
     info!("create database success");
