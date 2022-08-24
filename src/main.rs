@@ -70,7 +70,7 @@ async fn main() -> Result<()> {
     let db = client.create_database(cfg.db.clone()).await?;
     info!("create database success");
     let collection = db
-        .create_collection(cfg.collection.clone(), Some(Partition::Hash { slots: 5 }))
+        .create_collection(cfg.collection.clone(), Some(Partition::Hash { slots: cfg.hash_slots }))
         .await?;
     info!("create collection success");
 
